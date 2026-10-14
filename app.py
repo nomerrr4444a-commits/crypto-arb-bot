@@ -13,21 +13,20 @@ TOKEN = "8634056973:AAF2eMhsePo5ndZbbj8ndqvIdYKBRKCt2k4"
 bot = telebot.TeleBot(TOKEN)
 latest_signals = []
 
-# 10 топових криптобірж
+# Топові криптобіржі
 EXCHANGES = {
-    'binance': ccxt.binance({'enableRateLimit': True}),
-    'bybit': ccxt.bybit({'enableRateLimit': True}),
-    'kucoin': ccxt.kucoin({'enableRateLimit': True}),
-    'whitebit': ccxt.whitebit({'enableRateLimit': True}),
-    'bitget': ccxt.bitget({'enableRateLimit': True}),
-    'htx': ccxt.htx({'enableRateLimit': True}),
-    'woo': ccxt.woo({'enableRateLimit': True}),
-    'kraken': ccxt.kraken({'enableRateLimit': True}),
-    'mexc': ccxt.mexc({'enableRateLimit': True}),
-    'gate': ccxt.gate({'enableRateLimit': True})
+    'binance': ccxt.binance({'enableRateLimit': True, 'timeout': 5000}),
+    'bybit': ccxt.bybit({'enableRateLimit': True, 'timeout': 5000}),
+    'kucoin': ccxt.kucoin({'enableRateLimit': True, 'timeout': 5000}),
+    'whitebit': ccxt.whitebit({'enableRateLimit': True, 'timeout': 5000}),
+    'bitget': ccxt.bitget({'enableRateLimit': True, 'timeout': 5000}),
+    'htx': ccxt.htx({'enableRateLimit': True, 'timeout': 5000}),
+    'woo': ccxt.woo({'enableRateLimit': True, 'timeout': 5000}),
+    'kraken': ccxt.kraken({'enableRateLimit': True, 'timeout': 5000}),
+    'mexc': ccxt.mexc({'enableRateLimit': True, 'timeout': 5000}),
+    'gate': ccxt.gate({'enableRateLimit': True, 'timeout': 5000})
 }
 
-# Популярні торгові пари
 SYMBOLS = [
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 
     'NEAR/USDT', 'AVAX/USDT', 'ADA/USDT', 'DOT/USDT', 'LINK/USDT', 
@@ -36,7 +35,6 @@ SYMBOLS = [
 
 def fetch_exchange_tickers(exchange_name, exchange_obj):
     try:
-        # Миттєве завантаження всіх тикерів біржі одним запитом
         tickers = exchange_obj.fetch_tickers(SYMBOLS)
         return exchange_name, tickers
     except Exception:
@@ -48,30 +46,32 @@ def fetch_exchange_tickers(exchange_name, exchange_obj):
 
 def background_scanner():
     global latest_signals
-    print("🚀 Ультрашвидкий сканер запрацював у хмарі...")
+    print("🚀 Стабільний сканер запущено у хмарі...")
     while True:
         found_signals = []
         prices_data = {symbol: {} for symbol in SYMBOLS}
         
-        # Паралельне опитування всіх 10 біржах одночасно (займає ~1.5 сек)
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             future_to_exchange = {
                 executor.submit(fetch_exchange_tickers, ex_name, ex): ex_name 
                 for ex_name, ex in EXCHANGES.items()
             }
             for future in concurrent.futures.as_completed(future_to_exchange):
-                ex_name, tickers = future.result()
-                if not tickers:
+                try:
+                    ex_name, tickers = future.result(timeout=6)
+                    if not tickers:
+                        continue
+                    for symbol in SYMBOLS:
+                        if symbol in tickers:
+                            t = tickers[symbol]
+                            bid = t.get('bid')
+                            ask = t.get('ask')
+                            if bid and ask:
+                                prices_data[symbol][ex_name] = {'bid': bid, 'ask': ask}
+                except Exception:
                     continue
-                for symbol in SYMBOLS:
-                    if symbol in tickers:
-                        t = tickers[symbol]
-                        bid = t.get('bid')
-                        ask = t.get('ask')
-                        if bid and ask:
-                            prices_data[symbol][ex_name] = {'bid': bid, 'ask': ask}
 
-        # Пошук арбітражних можливостей
+        # Пошук арбітражу
         for symbol, ex_prices in prices_data.items():
             ex_list = list(ex_prices.keys())
             for i in range(len(ex_list)):
@@ -89,7 +89,6 @@ def background_scanner():
 
                     spread = ((bid_price - ask_price) / ask_price) * 100
 
-                    # Фільтр реалістичного спреду
                     if 0.2 <= spread <= 25.0:
                         found_signals.append({
                             'symbol': symbol,
@@ -102,7 +101,7 @@ def background_scanner():
 
         found_signals = sorted(found_signals, key=lambda x: x['spread'], reverse=True)
         latest_signals = found_signals[:40]
-        time.sleep(2)  # оновлення кожні 2 секунди
+        time.sleep(3)
 
 # HTML/JS Інтерфейс Telegram Mini App
 HTML_TEMPLATE = """
@@ -242,7 +241,7 @@ HTML_TEMPLATE = """
 
     <div id="signals" class="signals-container">
         <div class="loader"></div>
-        <div class="no-signals">Миттєве сканування ринку...</div>
+        <div class="no-signals">Завантаження зв'язок...</div>
     </div>
 
     <script>
@@ -256,7 +255,7 @@ HTML_TEMPLATE = """
                 let container = document.getElementById('signals');
                 
                 if (data.length === 0) {
-                    container.innerHTML = '<div class="no-signals">Аналізуємо біржі, чекаємо перші зв\'язки...</div>';
+                    container.innerHTML = '<div class="no-signals">Скануємо біржі, очікуйте кілька секунд...</div>';
                     return;
                 }
 
@@ -285,12 +284,12 @@ HTML_TEMPLATE = """
                     `;
                 });
                 container.innerHTML = html;
-            } повний catch (e) {
-                console.error('Помилка:', e);
+            } catch (e) {
+                console.error('Помилка завантаження:', e);
             }
         }
 
-        setInterval(fetchSignals, 3000);
+        setInterval(fetchSignals, 4000);
         fetchSignals();
     </script>
 </body>
