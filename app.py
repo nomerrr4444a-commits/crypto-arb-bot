@@ -27,13 +27,14 @@ EXCHANGES = {
     'gate': ccxt.gate({'enableRateLimit': True, 'timeout': 5000})
 }
 
-# Розширений список монет
+# Розширений список монет, включаючи AI-токені та трендові пари
 SYMBOLS = [
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 
     'NEAR/USDT', 'AVAX/USDT', 'ADA/USDT', 'DOT/USDT', 'LINK/USDT', 
     'SUI/USDT', 'ARB/USDT', 'OP/USDT', 'PEPE/USDT', 'RENDER/USDT',
     'MNT/USDT', 'TON/USDT', 'TIA/USDT', 'INJ/USDT', 'SEI/USDT',
-    'APT/USDT', 'FET/USDT', 'WLD/USDT', 'STRK/USDT'
+    'APT/USDT', 'FET/USDT', 'WLD/USDT', 'STRK/USDT', 'AI/USDT', 
+    'TAO/USDT', 'GRT/USDT', 'OCEAN/USDT', 'AGIX/USDT', 'PNUT/USDT', 'NEIRO/USDT'
 ]
 
 def fetch_exchange_data(exchange_name, exchange_obj):
@@ -50,7 +51,7 @@ def fetch_exchange_data(exchange_name, exchange_obj):
 
 def background_scanner():
     global latest_signals
-    print("🚀 Розумний арбітражний сканер запущено у хмарі...")
+    print("🚀 Розширений сканер AI та арбітражу запущено у хмарі...")
     
     while True:
         raw_signals = []
@@ -108,17 +109,24 @@ def background_scanner():
 
                     spread = ((bid_price - ask_price) / ask_price) * 100
 
-                    if 0.3 <= spread <= 30.0:
+                    # Розширюємо межі до 40% для відлову унікальних AI/волатильних спредів
+                    if 0.3 <= spread <= 40.0:
+                        # Формуємо поради щодо переказу та комісій
+                        fee_advice = "Використовуйте мережу з найнижчою комісією (наприклад, BSC, TRC20 для стейблкоїнів або нативну мережу монети). Торгові комісії бірж зазвичай становлять 0.1%."
+                        if "USDT" in symbol:
+                            fee_advice = "Для виведення/переказу USDT обирайте мережу TRC20 (~$1) або Arbitrum/Polygon (~$0.1), якщо вона підтримується обома біржами."
+
                         raw_signals.append({
                             'symbol': symbol,
                             'buy_exchange': ex_buy,
                             'sell_exchange': ex_sell,
                             'buy_price': ask_price,
                             'sell_price': bid_price,
-                            'spread': round(spread, 2)
+                            'spread': round(spread, 2),
+                            'advice': fee_advice
                         })
 
-        # ФІЛЬТРАЦІЯ: залишаємо ТІЛЬКИ найкращий (найвигідніший) сигнал для кожної монети
+        # Фільтрація: залишаємо ТІЛЬКИ найкращий сигнал для кожної монети
         best_per_coin = {}
         for sig in raw_signals:
             sym = sig['symbol']
@@ -126,13 +134,12 @@ def background_scanner():
                 best_per_coin[sym] = sig
 
         found_signals = list(best_per_coin.values())
-        # Сортуємо від найбільшого спреду до найменшого
         found_signals = sorted(found_signals, key=lambda x: x['spread'], reverse=True)
         
-        latest_signals = found_signals[:30]
+        latest_signals = found_signals[:35]
         time.sleep(3)
 
-# HTML/JS Інтерфейс Telegram Mini App
+# HTML/JS Інтерфейс Telegram Mini App з інтерактивними модалками
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="uk">
@@ -149,6 +156,7 @@ HTML_TEMPLATE = """
             --accent-color: #10b981;
             --secondary-text: #94a3b8;
             --border-color: #334155;
+            --modal-bg: #1e293b;
         }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -188,6 +196,12 @@ HTML_TEMPLATE = """
             border-radius: 12px;
             padding: 12px 14px;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            cursor: pointer;
+            transition: transform 0.1s, border-color 0.2s;
+        }
+        .signal-card:active {
+            transform: scale(0.98);
+            border-color: var(--accent-color);
         }
         .signal-header {
             display: flex;
@@ -241,6 +255,77 @@ HTML_TEMPLATE = """
             font-weight: bold;
             font-size: 16px;
         }
+        .tap-hint {
+            font-size: 11px;
+            color: var(--secondary-text);
+            text-align: center;
+            margin-top: 6px;
+        }
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.7);
+            justify-content: center;
+            align-items: flex-end;
+            z-index: 100;
+        }
+        .modal-content {
+            background: var(--card-bg);
+            width: 100%;
+            max-width: 500px;
+            border-top-left-radius: 20px;
+            border-top-right-radius: 20px;
+            padding: 20px;
+            box-sizing: border-box;
+            border-top: 1px solid var(--border-color);
+            animation: slideUp 0.3s ease-out;
+        }
+        @keyframes slideUp {
+            from { transform: translateY(100%); }
+            to { transform: translateY(0); }
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .modal-title {
+            font-size: 18px;
+            font-weight: 700;
+        }
+        .close-btn {
+            background: none;
+            border: none;
+            color: var(--secondary-text);
+            font-size: 20px;
+            cursor: pointer;
+        }
+        .modal-body p {
+            font-size: 13px;
+            color: var(--secondary-text);
+            margin: 6px 0;
+            line-height: 1.4;
+        }
+        .modal-body strong {
+            color: var(--text-color);
+        }
+        .action-btn {
+            display: block;
+            width: 100%;
+            background: var(--accent-color);
+            color: #0f172a;
+            border: none;
+            padding: 12px;
+            border-radius: 10px;
+            font-weight: 700;
+            font-size: 15px;
+            text-align: center;
+            margin-top: 16px;
+            cursor: pointer;
+        }
         .no-signals {
             text-align: center;
             padding: 40px 20px;
@@ -264,34 +349,50 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="header">
-        <h1>⚡ Crypto Scanner</h1>
+        <h1>⚡ AI & Crypto Scanner</h1>
         <div class="status-badge" id="status">LIVE 🟢</div>
     </div>
 
     <div id="signals" class="signals-container">
         <div class="loader"></div>
-        <div class="no-signals">Скануємо ринок та формуємо найкращі зв'язки...</div>
+        <div class="no-signals">Скануємо ринок та AI-монети...</div>
+    </div>
+
+    <!-- Модальне вікно деталей -->
+    <div id="signalModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span class="modal-title" id="modalCoin">BTC/USDT</span>
+                <button class="close-btn" onclick="closeModal()">✕</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <!-- Контент заповнюється динамічно -->
+            </div>
+            <button class="action-btn" onclick="closeModal()">Зрозуміло</button>
+        </div>
     </div>
 
     <script>
         let tg = window.Telegram.WebApp;
         tg.expand();
+        let currentSignals = [];
 
         async function fetchSignals() {
             try {
                 let response = await fetch('/api/signals');
                 let data = await response.json();
+                currentSignals = data;
                 let container = document.getElementById('signals');
                 
                 if (data.length === 0) {
-                    container.innerHTML = '<div class="no-signals">Збираємо свіжі дані з бірж, зачекайте кілька секунд...</div>';
+                    container.innerHTML = '<div class="no-signals">Шукаємо вигідні спреди по AI та топ-монетах...</div>';
                     return;
                 }
 
                 let html = '';
-                data.forEach(sig => {
+                data.forEach((sig, index) => {
                     html += `
-                        <div class="signal-card">
+                        <div class="signal-card" onclick="openModal(${index})">
                             <div class="signal-header">
                                 <span class="coin-name">${sig.symbol}</span>
                                 <span class="spread-badge">+${sig.spread}%</span>
@@ -309,13 +410,37 @@ HTML_TEMPLATE = """
                                     <span class="ex-price">${sig.sell_price}</span>
                                 </div>
                             </div>
+                            <div class="tap-hint">Натисніть для перегляду комісій та інструкції 👆</div>
                         </div>
                     `;
                 });
                 container.innerHTML = html;
             } catch (e) {
-                console.error('Помилка:', e);
+                console.error('Помилка завантаження:', e);
             }
+        }
+
+        function openModal(index) {
+            let sig = currentSignals[index];
+            if (!sig) return;
+
+            document.getElementById('modalCoin').innerText = `${sig.symbol} (Спред: +${sig.spread}%)`;
+            
+            let bodyHtml = `
+                <p>🛒 <strong>Купити на біржі:</strong> ${sig.buy_exchange.toUpperCase()} по ціні <code>${sig.buy_price}</code></p>
+                <p>💰 <strong>Продати на біржі:</strong> ${sig.sell_exchange.toUpperCase()} по ціні <code>${sig.sell_price}</code></p>
+                <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 10px 0;">
+                <p>⚙️ <strong>Комісії та переказ:</strong></p>
+                <p>${sig.advice}</p>
+                <p style="color: #38bdf8; margin-top: 8px;">💡 <em>Порада: Завжди перевіряйте відкриті мережі для введення/виведення на обох біржах перед здійсненням арбітражу!</em></p>
+            `;
+            
+            document.getElementById('modalBody').innerHTML = bodyHtml;
+            document.getElementById('signalModal').style.display = 'flex';
+        }
+
+        function closeModal() {
+            document.getElementById('signalModal').style.display = 'none';
         }
 
         setInterval(fetchSignals, 4000);
