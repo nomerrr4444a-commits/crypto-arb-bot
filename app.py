@@ -1,470 +1,143 @@
-import os
-import time
-import threading
-import concurrent.futures
-from flask import Flask, render_template_string, jsonify
-import ccxt
-import telebot
+                    exchange_id, data, errors = future.result()
+                    books[exchange_id] = data
+                    if errors:
+                        exchange_errors.append(f"{exchange_id}: стакан недоступний для {len(errors)} пар")
+                except Exception as exc:
+                    exchange_errors.append(f"book worker: {type(exc).__name__}")
 
-app = Flask(__name__)
+    signals: list[dict[str, Any]] = []
+    for route in candidates:
+        symbol = route["symbol"]
+        buy_book = books.get(route["buy_exchange"], {}).get(symbol)
+        sell_book = books.get(route["sell_exchange"], {}).get(symbol)
+        sizes: dict[str, Any] = {}
+        for amount in TEST_AMOUNTS_USD:
+            sizes[str(int(amount))] = evaluate_size(route, buy_book, sell_book, amount)
+        # Keep all checked opportunities visible so the user can see why a route failed.
+        liquidity = "Висока" if all(
+            r["buy_full"] and r["sell_full"] and r["max_impact_pct"] is not None and r["max_impact_pct"] <= MAX_ACCEPTABLE_BOOK_IMPACT_PCT
+            for r in sizes.values()
+        ) else "Потребує перевірки"
+        signals.append({
+            "symbol": symbol,
+            "buy_exchange": route["buy_exchange"],
+            "sell_exchange": route["sell_exchange"],
+            "buy_price": route["buy_price"],
+            "sell_price": route["sell_price"],
+            "gross_spread_pct": route["gross_spread"],
+            "preliminary_net_pct": route["preliminary_net"],
+            "buy_volume_24h": route["buy_volume_24h"],
+            "sell_volume_24h": route["sell_volume_24h"],
+            "buy_fee_pct": route["buy_fee"] * 100,
+            "sell_fee_pct": route["sell_fee"] * 100,
+            "fee_estimated": route["buy_fee_estimated"] or route["sell_fee_estimated"],
+            "liquidity": liquidity,
+            "sizes": sizes,
+            "transfer_costs_checked": False,
+        })
 
-# ==================== НАЛАШТУВАННЯ ====================
-TOKEN = "8634056973:AAF2eMhsePo5ndZbbj8ndqvIdYKBRKCt2k4" 
-bot = telebot.TeleBot(TOKEN)
-latest_signals = []
+    signals.sort(
+        key=lambda sig: max(
+            (sig["sizes"][str(int(amount))].get("net_spread_pct") or -999 for amount in TEST_AMOUNTS_USD),
+            default=-999,
+        ),
+        reverse=True,
+    )
+    status = {
+        "running": True,
+        "last_scan": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "exchange_count": fetched_count,
+        "configured_exchange_count": len(EXCHANGES),
+        "market_count": loaded_market_count,
+        "shared_symbols": len(ticker_data),
+        "candidate_count": len(signals),
+        "error_exchanges": exchange_errors[:15],
+        "duration_seconds": round(time.time() - started_at, 1),
+        "message": "Сканування завершено" if signals else "Підходящих маршрутів поки не знайдено",
+    }
+    return signals, status
 
-# Топові криптобіржі
-EXCHANGES = {
-    'binance': ccxt.binance({'enableRateLimit': True, 'timeout': 5000}),
-    'bybit': ccxt.bybit({'enableRateLimit': True, 'timeout': 5000}),
-    'kucoin': ccxt.kucoin({'enableRateLimit': True, 'timeout': 5000}),
-    'whitebit': ccxt.whitebit({'enableRateLimit': True, 'timeout': 5000}),
-    'bitget': ccxt.bitget({'enableRateLimit': True, 'timeout': 5000}),
-    'htx': ccxt.htx({'enableRateLimit': True, 'timeout': 5000}),
-    'woo': ccxt.woo({'enableRateLimit': True, 'timeout': 5000}),
-    'kraken': ccxt.kraken({'enableRateLimit': True, 'timeout': 5000}),
-    'mexc': ccxt.mexc({'enableRateLimit': True, 'timeout': 5000}),
-    'gate': ccxt.gate({'enableRateLimit': True, 'timeout': 5000})
-}
 
-# Список стабільних і ліквідних монет
-SYMBOLS = [
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 
-    'AVAX/USDT', 'DOT/USDT', 'LINK/USDT', 'NEAR/USDT', 'SUI/USDT', 
-    'ARB/USDT', 'OP/USDT', 'RENDER/USDT', 'MNT/USDT', 'TON/USDT', 
-    'TIA/USDT', 'INJ/USDT', 'SEI/USDT', 'APT/USDT', 'ATOM/USDT',
-    'LTC/USDT', 'UNI/USDT', 'POL/USDT'
-]
-
-def fetch_exchange_data(exchange_name, exchange_obj):
-    try:
-        exchange_obj.load_markets()
-        tickers = exchange_obj.fetch_tickers()
-        return exchange_name, tickers
-    except Exception:
-        try:
-            tickers = exchange_obj.fetch_tickers(SYMBOLS)
-            return exchange_name, tickers
-        except Exception:
-            return exchange_name, {}
-
-def background_scanner():
-    global latest_signals
-    print("🚀 Сканер ліквідності запрацював...")
-    
+def background_scanner() -> None:
+    log.info("Приватний сканер працює. Торги й перекази не виконуються.")
     while True:
-        raw_signals = []
-        prices_data = {}
+        try:
+            with state_lock:
+                scanner_status["running"] = True
+                scanner_status["message"] = "Оновлюємо котирування і стакани…"
+            signals, status = scan_once()
+            with state_lock:
+                latest_signals[:] = signals
+                scanner_status.clear()
+                scanner_status.update(status)
+            log.info("Сканування: %d маршрутів, %d бірж, %.1f c", len(signals), status["exchange_count"], status["duration_seconds"])
+        except Exception as exc:
+            log.exception("Помилка циклу сканера")
+            with state_lock:
+                scanner_status["running"] = False
+                scanner_status["message"] = f"Помилка сканера: {type(exc).__name__}"
+                scanner_status["error_exchanges"] = [str(exc)[:200]]
+        time.sleep(SCAN_INTERVAL_SECONDS)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(fetch_exchange_data, ex_name, ex) for ex_name, ex in EXCHANGES.items()]
-            
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    ex_name, tickers = future.result(timeout=6)
-                    if not tickers:
-                        continue
-                    
-                    for symbol in SYMBOLS:
-                        ticker = None
-                        if symbol in tickers:
-                            ticker = tickers[symbol]
-                        else:
-                            alt = symbol.replace('/', '')
-                            for k, v in tickers.items():
-                                if symbol in k or alt in k.replace('/', ''):
-                                    ticker = v
-                                    break
-                        
-                        if ticker:
-                            bid = ticker.get('bid')
-                            ask = ticker.get('ask')
-                            quote_volume = ticker.get('quoteVolume', 50000)
-                            if bid and ask and float(bid) > 0 and float(ask) > 0:
-                                if symbol not in prices_data:
-                                    prices_data[symbol] = {}
-                                prices_data[symbol][ex_name] = {
-                                    'bid': float(bid), 
-                                    'ask': float(ask),
-                                    'volume': float(quote_volume) if quote_volume else 50000
-                                }
-                except Exception:
-                    continue
 
-        for symbol, ex_prices in prices_data.items():
-            ex_list = list(ex_prices.keys())
-            if len(ex_list) < 2:
-                continue
-                
-            for i in range(len(ex_list)):
-                for j in range(len(ex_list)):
-                    if i == j:
-                        continue
-                    ex_buy = ex_list[i]
-                    ex_sell = ex_list[j]
+# ------------------------------ Dashboard ------------------------------
+DASHBOARD_HTML = r"""<!doctype html><html lang="uk"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Приватний криптоарбітражний сканер</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1220;--card:#121e30;--line:#26354a;--muted:#9badc4;--green:#48e0ae;--red:#ff8f9a;--blue:#84cfff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#e6edf7;font-family:Segoe UI,Arial,sans-serif;padding:20px}.wrap{max-width:1320px;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}.brand h1{font-size:22px;margin:0 0 5px}.sub{font-size:12px;color:var(--muted)}.pill{border:1px solid #245944;background:#103326;color:var(--green);border-radius:30px;padding:8px 12px;font-size:12px}.logout{border:1px solid #34445b;background:#172338;color:#e9f0f9;border-radius:9px;padding:9px 12px;cursor:pointer}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.stat{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:14px}.stat label{display:block;color:var(--muted);font-size:12px;margin-bottom:8px}.stat b{font-size:20px}.notice{border:1px solid #5d4b27;background:#2a2417;color:#e9d39a;border-radius:12px;padding:12px 14px;line-height:1.5;font-size:12px;margin:12px 0 16px}.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:15px 0}.toolbar input{min-width:200px;flex:1;background:#101b2d;border:1px solid #2a3b51;color:#fff;padding:11px 12px;border-radius:10px}.hint{color:var(--muted);font-size:12px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.signal{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:15px;cursor:pointer;transition:border .15s}.signal:hover{border-color:#4a7893}.signalhead{display:flex;justify-content:space-between;gap:10px;align-items:start;margin-bottom:10px}.coin{font-weight:800;font-size:17px}.route{font-size:12px;color:var(--muted);margin-top:4px}.spread{border-radius:7px;background:#153629;color:var(--green);font-weight:800;font-size:12px;padding:6px 8px;white-space:nowrap}.prices{display:grid;grid-template-columns:1fr 1fr;gap:8px}.pricebox{background:#0b1422;border:1px solid #1d2c41;border-radius:9px;padding:10px}.pricebox label{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.pricebox b{font-family:Consolas,monospace;font-size:13px;overflow-wrap:anywhere}.sizerow{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:9px}.size{padding:10px;border-radius:9px;border:1px solid #26394d;background:#0d1727}.size.good{border-color:#267d5d;background:#102d26}.size.no{border-color:#5a3540}.size strong{display:block;font-size:12px;margin-bottom:5px}.size .number{font-size:16px;font-weight:800}.size small{display:block;color:var(--muted);font-size:11px;margin-top:4px;line-height:1.4}.goodtext{color:var(--green)}.badtext{color:#ffacb4}.muted{color:var(--muted)}.empty{padding:35px;text-align:center;color:var(--muted);background:var(--card);border-radius:12px;border:1px solid var(--line);grid-column:1/-1}.footer{color:#7f91a8;font-size:11px;line-height:1.6;margin-top:18px}.modal{display:none;position:fixed;inset:0;background:#000b;z-index:9;align-items:center;justify-content:center;padding:16px}.modalbox{width:min(640px,100%);max-height:90vh;overflow:auto;background:#121e30;border:1px solid #34445b;border-radius:16px;padding:18px}.modalhead{display:flex;align-items:center;justify-content:space-between;gap:10px}.modalhead h2{font-size:18px;margin:0}.close{border:0;background:#26374b;color:#fff;border-radius:8px;padding:8px 11px;cursor:pointer}.detailgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.detail{padding:12px;background:#0c1626;border:1px solid #26374b;border-radius:10px}.detail h3{font-size:13px;margin:0 0 8px}.detail p{font-size:12px;color:var(--muted);margin:5px 0}.danger{color:#ffb1b8}.success{color:var(--green)}@media(max-width:850px){.grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}}@media(max-width:480px){body{padding:12px}.brand h1{font-size:18px}.stats{gap:7px}.stat{padding:11px}.stat b{font-size:16px}.detailgrid{grid-template-columns:1fr}}
+</style></head><body><main class="wrap"><header class="top"><div class="brand"><h1>⚡ Приватний арбітражний сканер</h1><div class="sub">Spot USDT · публічні API · без автоматичних угод</div></div><div style="display:flex;gap:10px;align-items:center"><span class="pill" id="statuspill">● запускається</span><form method="post" action="/logout"><button class="logout" type="submit">Вийти</button></form></div></header>
+<section class="stats"><div class="stat"><label>Біржі з даними</label><b id="excount">—</b></div><div class="stat"><label>Монети / ринки</label><b id="marketcount">—</b></div><div class="stat"><label>Перевірені маршрути</label><b id="routecount">—</b></div><div class="stat"><label>Останнє сканування</label><b id="lastscan" style="font-size:13px">очікування</b></div></section>
+<div class="notice"><b>Що означає «ТАК»:</b> стакан показав достатню глибину для всієї суми, чистий спред після приблизних торгових комісій не нижче <b>1,5%</b>, а розрахункове прослизання не вище <b>0,5%</b>. <b>Комісії виведення, мережа, блокування депозиту/виведення та рух ціни під час переказу не включені</b> — тому це ще не гарантія прибутку.</div>
+<div class="toolbar"><input id="search" placeholder="Пошук монети або біржі, наприклад SOL…" autocomplete="off"><span class="hint" id="scanmsg">Перший цикл може зайняти трохи часу.</span></div><section id="signals" class="grid"><div class="empty">Підключаємо публічні API бірж…</div></section>
+<div class="footer">Відбір: USDT spot, обсяг пари від $100 000 за 24 год, внутрішній спред біржі до 2%, актуальність котирувань і глибина до 20 рівнів стакана. Приблизні комісії, якщо біржа їх не повідомляє через CCXT, рахуються як 0,10% на кожну сторону. Спочатку вручну перевір статус депозиту/виведення і доступну мережу на обох біржах. Сканер не має API-ключів бірж і не може торгувати.</div></main>
+<div id="modal" class="modal" onclick="if(event.target===this)closeModal()"><div class="modalbox"><div class="modalhead"><h2 id="modaltitle">Деталі</h2><button class="close" onclick="closeModal()">Закрити</button></div><div id="modalbody"></div></div></div>
+<script>
+let allSignals=[];let lastStatus={};
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function money(x){return x==null||!Number.isFinite(Number(x))?'—':'$'+Number(x).toFixed(2)}
+function pct(x){return x==null||!Number.isFinite(Number(x))?'—':(Number(x)>=0?'+':'')+Number(x).toFixed(2)+'%'}
+function price(x){if(x==null)return '—';return Number(x).toLocaleString('en-US',{maximumSignificantDigits:10});}
+function sizeCard(amount,r){if(!r)return '';const good=!!r.good;let amountLabel='$'+amount;let value=r.profit_usd==null?'НЕ ПІДТВЕРДЖЕНО':money(r.profit_usd);let spread=r.net_spread_pct==null?'—':pct(r.net_spread_pct);return `<div class="size ${good?'good':'no'}"><strong>${amountLabel} · ${good?'<span class="goodtext">ПІДХОДИТЬ</span>':'<span class="badtext">НЕ ПІДТВЕРДЖЕНО</span>'}</strong><div class="number">${esc(value)}</div><small>Чистий спред: ${esc(spread)}<br>${esc(r.status)}<br>Прослизання: ${r.max_impact_pct==null?'—':esc(Number(r.max_impact_pct).toFixed(3)+'%')}</small></div>`;}
+function card(sig,i){let sizes=sig.sizes||{};return `<article class="signal" onclick="openModal(${i})"><div class="signalhead"><div><div class="coin">${esc(sig.symbol)}</div><div class="route">${esc(sig.buy_exchange.toUpperCase())} → ${esc(sig.sell_exchange.toUpperCase())}</div></div><div class="spread">Брутто ${esc(pct(sig.gross_spread_pct))}</div></div><div class="prices"><div class="pricebox"><label>Купити (ask)</label><b>${esc(price(sig.buy_price))}</b></div><div class="pricebox"><label>Продати (bid)</label><b>${esc(price(sig.sell_price))}</b></div></div><div class="sizerow">${sizeCard(39,sizes['39'])}${sizeCard(152,sizes['152'])}</div><div class="route" style="margin-top:10px">24h volume: ${esc(money(sig.buy_volume_24h))} / ${esc(money(sig.sell_volume_24h))} · ${esc(sig.liquidity)}</div></article>`;}
+function renderSignals(){let q=document.getElementById('search').value.trim().toLowerCase();let filtered=allSignals.filter(s=>`${s.symbol} ${s.buy_exchange} ${s.sell_exchange}`.toLowerCase().includes(q));let el=document.getElementById('signals');el.innerHTML=filtered.length?filtered.map(s=>card(s,allSignals.indexOf(s))).join(''):'<div class="empty">Поки немає маршрутів, що пройшли попередній відбір. Це не означає, що на ринку немає арбітражу — спробуй оновити пізніше.</div>';}
+function openModal(index){let s=allSignals[index];if(!s)return;document.getElementById('modaltitle').textContent=s.symbol+' · '+s.buy_exchange.toUpperCase()+' → '+s.sell_exchange.toUpperCase();const block=(amt,r)=>{if(!r)return '';return `<div class="detail"><h3>$${amt}: ${r.good?'<span class="success">ПІДХОДИТЬ</span>':'<span class="danger">НЕ ПІДТВЕРДЖЕНО</span>'}</h3><p>Результат після торгових комісій: <b>${esc(money(r.profit_usd))}</b></p><p>Чистий спред: <b>${esc(pct(r.net_spread_pct))}</b></p><p>Купівля: ${r.buy_full?'повна':'неповна'}; продаж: ${r.sell_full?'повний':'неповний'}</p><p>Прослизання купівлі: ${r.buy_impact_pct==null?'—':esc(Number(r.buy_impact_pct).toFixed(3)+'%')}</p><p>Прослизання продажу: ${r.sell_impact_pct==null?'—':esc(Number(r.sell_impact_pct).toFixed(3)+'%')}</p><p>Комісія купівлі/продажу: ${esc(Number(r.buy_fee_pct).toFixed(3))}% / ${esc(Number(r.sell_fee_pct).toFixed(3))}%${r.fees_estimated?' (оцінка)':''}</p><p>${esc(r.status)}</p></div>`};document.getElementById('modalbody').innerHTML=`<div class="detailgrid">${block(39,s.sizes['39'])}${block(152,s.sizes['152'])}</div><div class="notice" style="margin-top:12px"><b>Важливо:</b> розрахунок передбачає, що обидва ордери можна виконати за оціненими рівнями стакана. Не враховані виведення/депозит, мережеві комісії, затримка переказу та зміна цін. Перевір на біржах, що депозит і виведення ${esc(s.symbol.split('/')[0])} активні через одну й ту саму мережу. Невідповідність токенів з однаковим тикером може зламати маршрут.</div>`;document.getElementById('modal').style.display='flex';}
+function closeModal(){document.getElementById('modal').style.display='none'}
+async function refresh(){try{let [sr,st]=await Promise.all([fetch('/api/signals',{cache:'no-store'}),fetch('/api/status',{cache:'no-store'})]);if(sr.status===401||st.status===401){location.href='/login';return}allSignals=await sr.json();lastStatus=await st.json();document.getElementById('excount').textContent=(lastStatus.exchange_count??'—')+' / '+(lastStatus.configured_exchange_count??'—');document.getElementById('marketcount').textContent=(lastStatus.shared_symbols??'—')+' / '+(lastStatus.market_count??'—');document.getElementById('routecount').textContent=allSignals.length;document.getElementById('lastscan').textContent=lastStatus.last_scan||'очікування';document.getElementById('scanmsg').textContent=(lastStatus.message||'')+(lastStatus.duration_seconds!=null?' · '+lastStatus.duration_seconds+' с':'');document.getElementById('statuspill').textContent=lastStatus.running?'● LIVE':'● очікування';renderSignals()}catch(e){document.getElementById('scanmsg').textContent='Зв’язок зі сканером відсутній';}}
+document.getElementById('search').addEventListener('input',renderSignals);refresh();setInterval(refresh,10000);
+</script></body></html>"""
 
-                    ask_price = ex_prices[ex_buy]['ask']
-                    bid_price = ex_prices[ex_sell]['bid']
 
-                    if not ask_price or not bid_price or ask_price <= 0:
-                        continue
-
-                    spread = ((bid_price - ask_price) / ask_price) * 100
-
-                    if 0.5 <= spread <= 8.0:
-                        vol_buy = ex_prices[ex_buy]['volume']
-                        vol_sell = ex_prices[ex_sell]['volume']
-                        min_vol = min(vol_buy, vol_sell)
-                        
-                        if min_vol > 500000:
-                            liq_status = "Висока 🟢"
-                            spins = "5–10+ прокрутів"
-                        elif min_vol > 100000:
-                            liq_status = "Середня 🟡"
-                            spins = "3–5 прокрутів"
-                        else:
-                            liq_status = "Помірні обсяги 🟠"
-                            spins = "1–2 прокрути"
-
-                        raw_signals.append({
-                            'symbol': symbol,
-                            'buy_exchange': ex_buy,
-                            'sell_exchange': ex_sell,
-                            'buy_price': ask_price,
-                            'sell_price': bid_price,
-                            'spread': round(spread, 2),
-                            'liquidity': liq_status,
-                            'spins_100': spins
-                        })
-
-        best_per_coin = {}
-        for sig in raw_signals:
-            sym = sig['symbol']
-            if sym not in best_per_coin or sig['spread'] > best_per_coin[sym]['spread']:
-                best_per_coin[sym] = sig
-
-        found_signals = list(best_per_coin.values())
-        found_signals = sorted(found_signals, key=lambda x: x['spread'], reverse=True)
-        
-        latest_signals = found_signals[:30]
-        time.sleep(3)
-
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="uk">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Crypto Arbitrage Scanner</title>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <style>
-        :root {
-            --bg-color: #0f172a;
-            --card-bg: #1e293b;
-            --text-color: #f8fafc;
-            --accent-color: #10b981;
-            --secondary-text: #94a3b8;
-            --border-color: #334155;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: var(--bg-color);
-            color: var(--text-color);
-            margin: 0;
-            padding: 12px;
-        }
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 14px;
-            padding: 0 4px;
-        }
-        h1 {
-            font-size: 18px;
-            margin: 0;
-            font-weight: 700;
-        }
-        .status-badge {
-            font-size: 11px;
-            background: rgba(16, 185, 129, 0.15);
-            color: var(--accent-color);
-            padding: 4px 8px;
-            border-radius: 12px;
-            font-weight: 600;
-        }
-        .signals-container {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .signal-card {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            padding: 12px 14px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-            cursor: pointer;
-            transition: transform 0.1s, border-color 0.2s;
-        }
-        .signal-card:active {
-            transform: scale(0.98);
-            border-color: var(--accent-color);
-        }
-        .signal-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 8px;
-        }
-        .coin-name {
-            font-size: 15px;
-            font-weight: 700;
-            color: #ffffff;
-        }
-        .spread-badge {
-            background: #10b981;
-            color: #0f172a;
-            font-weight: 800;
-            font-size: 13px;
-            padding: 3px 8px;
-            border-radius: 6px;
-        }
-        .route-box {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background: rgba(15, 23, 42, 0.5);
-            padding: 8px 10px;
-            border-radius: 8px;
-            font-size: 13px;
-        }
-        .exchange-col {
-            display: flex;
-            flex-direction: column;
-        }
-        .ex-title {
-            font-size: 10px;
-            color: var(--secondary-text);
-            text-transform: uppercase;
-        }
-        .ex-name {
-            font-weight: 600;
-            color: #e2e8f0;
-            text-transform: uppercase;
-        }
-        .ex-price {
-            font-family: monospace;
-            color: #38bdf8;
-            font-size: 12px;
-        }
-        .arrow {
-            color: var(--secondary-text);
-            font-weight: bold;
-            font-size: 16px;
-        }
-        .tap-hint {
-            font-size: 11px;
-            color: var(--secondary-text);
-            text-align: center;
-            margin-top: 6px;
-        }
-        .modal {
-            display: none;
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.7);
-            justify-content: center;
-            align-items: flex-end;
-            z-index: 100;
-        }
-        .modal-content {
-            background: var(--card-bg);
-            width: 100%;
-            max-width: 500px;
-            border-top-left-radius: 20px;
-            border-top-right-radius: 20px;
-            padding: 20px;
-            box-sizing: border-box;
-            border-top: 1px solid var(--border-color);
-            animation: slideUp 0.3s ease-out;
-        }
-        @keyframes slideUp {
-            from { transform: translateY(100%); }
-            to { transform: translateY(0); }
-        }
-        .modal-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 12px;
-        }
-        .modal-title {
-            font-size: 18px;
-            font-weight: 700;
-        }
-        .close-btn {
-            background: none;
-            border: none;
-            color: var(--secondary-text);
-            font-size: 20px;
-            cursor: pointer;
-        }
-        .modal-body p {
-            font-size: 13px;
-            color: var(--secondary-text);
-            margin: 8px 0;
-            line-height: 1.4;
-        }
-        .modal-body strong {
-            color: var(--text-color);
-        }
-        .action-btn {
-            display: block;
-            width: 100%;
-            background: var(--accent-color);
-            color: #0f172a;
-            border: none;
-            padding: 12px;
-            border-radius: 10px;
-            font-weight: 700;
-            font-size: 15px;
-            text-align: center;
-            margin-top: 16px;
-            cursor: pointer;
-        }
-        .no-signals {
-            text-align: center;
-            padding: 40px 20px;
-            color: var(--secondary-text);
-            font-size: 14px;
-        }
-        .loader {
-            border: 3px solid var(--border-color);
-            border-top: 3px solid var(--accent-color);
-            border-radius: 50%;
-            width: 24px;
-            height: 24px;
-            animation: spin 1s linear infinite;
-            margin: 20px auto;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>⚡ Safe Crypto Arbitrage</h1>
-        <div class="status-badge" id="status">LIVE 🟢</div>
-    </div>
-
-    <div id="signals" class="signals-container">
-        <div class="loader"></div>
-        <div class="no-signals">Скануємо ринкові пари...</div>
-    </div>
-
-    <div id="signalModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <span class="modal-title" id="modalCoin">BTC/USDT</span>
-                <button class="close-btn" onclick="closeModal()">✕</button>
-            </div>
-            <div class="modal-body" id="modalBody"></div>
-            <button class="action-btn" onclick="closeModal()">Зрозуміло</button>
-        </div>
-    </div>
-
-    <script>
-        let tg = window.Telegram.WebApp;
-        tg.expand();
-        let currentSignals = [];
-
-        async function fetchSignals() {
-            try {
-                let response = await fetch('/api/signals');
-                let data = await response.json();
-                currentSignals = data;
-                let container = document.getElementById('signals');
-                
-                if (data.length === 0) {
-                    container.innerHTML = '<div class="no-signals">Аналізуємо спреди по ліквідних монетах...</div>';
-                    return;
-                }
-
-                let html = '';
-                data.forEach((sig, index) => {
-                    html += `
-                        <div class="signal-card" onclick="openModal(${index})">
-                            <div class="signal-header">
-                                <span class="coin-name">${sig.symbol}</span>
-                                <span class="spread-badge">+${sig.spread}%</span>
-                            </div>
-                            <div class="route-box">
-                                <div class="exchange-col">
-                                    <span class="ex-title">Купити</span>
-                                    <span class="ex-name">${sig.buy_exchange}</span>
-                                    <span class="ex-price">${sig.buy_price}</span>
-                                </div>
-                                <div class="arrow">➔</div>
-                                <div class="exchange-col" style="text-align: right;">
-                                    <span class="ex-title">Продати</span>
-                                    <span class="ex-name">${sig.sell_exchange}</span>
-                                    <span class="ex-price">${sig.sell_price}</span>
-                                </div>
-                            </div>
-                            <div class="tap-hint">Натисніть для деталей ліквідності та часу 👆</div>
-                        </div>
-                    `;
-                });
-                container.innerHTML = html;
-            } catch (e) {
-                console.error('Помилка завантаження:', e);
-            }
-        }
-
-        function openModal(index) {
-            let sig = currentSignals[index];
-            if (!sig) return;
-
-            document.getElementById('modalCoin').innerText = `${sig.symbol} (+${sig.spread}%)`;
-            
-            let bodyHtml = `
-                <p>📊 <strong>Ліквідність:</strong> ${sig.liquidity}</p>
-                <p>🔄 <strong>Прокрути на $100:</strong> Доступно <code>${sig.spins_100}</code> без втрати спреду</p>
-                <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 10px 0;">
-                <p>⚡ <strong>Мережа TRC-20 (USDT):</strong></p>
-                <p>⏱️ <strong>Час транзакції:</strong> приблизно <code>2–5 хвилин</code></p>
-                <p>💸 <strong>Комісія мережі:</strong> ~$1</p>
-            `;
-            
-            document.getElementById('modalBody').innerHTML = bodyHtml;
-            document.getElementById('signalModal').style.display = 'flex';
-        }
-
-        function closeModal() {
-            document.getElementById('signalModal').style.display = 'none';
-        }
-
-        setInterval(fetchSignals, 4000);
-        fetchSignals();
-    </script>
-</body>
-</html>
-"""
-
-@app.route('/')
+@app.route("/")
+@login_required
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template_string(DASHBOARD_HTML)
 
-@app.route('/api/signals')
-def get_signals():
-    return jsonify(latest_signals)
 
-if __name__ == '__main__':
-    scanner_thread = threading.Thread(target=background_scanner, daemon=True)
+@app.route("/api/signals")
+@login_required
+def api_signals():
+    with state_lock:
+        return jsonify(latest_signals)
+
+
+@app.route("/api/status")
+@login_required
+def api_status():
+    with state_lock:
+        return jsonify(dict(scanner_status))
+
+
+if __name__ == "__main__":
+    if not EXCHANGES:
+        raise RuntimeError("Не вдалося ініціалізувати жодну біржу. Перевстанови ccxt.")
+    scanner_thread = threading.Thread(target=background_scanner, daemon=True, name="market-scanner")
     scanner_thread.start()
-    
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    port = int(os.environ.get("PORT", "5000"))
+    host = os.getenv("HOST", "0.0.0.0" if os.getenv("PORT") else "127.0.0.1")
+    if os.getenv("PORT"):
+        # Waitress is used for hosted deployments; no Flask debug/reloader.
+        from waitress import serve
+        serve(app, host=host, port=port, threads=8)
+    else:
+        print(f"\nВідкрий у браузері: http://127.0.0.1:{port}")
+        print("Пароль не зберігається у файлі. Не використовуй пароль від біржі.\n")
+        app.run(host=host, port=port, debug=False, threaded=True, use_reloader=False)
