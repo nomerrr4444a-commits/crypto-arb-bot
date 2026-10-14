@@ -27,7 +27,7 @@ EXCHANGES = {
     'gate': ccxt.gate({'enableRateLimit': True, 'timeout': 5000})
 }
 
-# Список стабільних, ліквідних монет для безпечного арбітражу
+# Список стабільних і ліквідних монет
 SYMBOLS = [
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 
     'AVAX/USDT', 'DOT/USDT', 'LINK/USDT', 'NEAR/USDT', 'SUI/USDT', 
@@ -50,13 +50,12 @@ def fetch_exchange_data(exchange_name, exchange_obj):
 
 def background_scanner():
     global latest_signals
-    print("🚀 Сканер стабільних арбітражних зв'язок запущено...")
+    print("🚀 Оновлений сканер ліквідності запрацював...")
     
     while True:
         raw_signals = []
         prices_data = {}
 
-        # Паралельне опитування всіх 10 бірж
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(fetch_exchange_data, ex_name, ex) for ex_name, ex in EXCHANGES.items()]
             
@@ -80,14 +79,19 @@ def background_scanner():
                         if ticker:
                             bid = ticker.get('bid')
                             ask = ticker.get('ask')
+                            quote_volume = ticker.get('quoteVolume', 50000) # обсяги за 24г
                             if bid and ask and float(bid) > 0 and float(ask) > 0:
                                 if symbol not in prices_data:
                                     prices_data[symbol] = {}
-                                prices_data[symbol][ex_name] = {'bid': float(bid), 'ask': float(ask)}
+                                prices_data[symbol][ex_name] = {
+                                    'bid': float(bid), 
+                                    'ask': float(ask),
+                                    'volume': float(quote_volume) if quote_volume else 50000
+                                }
                 except Exception:
                     continue
 
-        # Пошук арбітражу на надійних монетах
+        # Пошук арбітражу
         for symbol, ex_prices in prices_data.items():
             ex_list = list(ex_prices.keys())
             if len(ex_list) < 2:
@@ -108,9 +112,21 @@ def background_scanner():
 
                     spread = ((bid_price - ask_price) / ask_price) * 100
 
-                    # Фокусуємося на здорових, реалістичних спредах від 0.5% до 8.0%
                     if 0.5 <= spread <= 8.0:
-                        fee_advice = f"Для монети {symbol}: купуйте на {ex_buy.upper()}, продавайте на {ex_sell.upper()}. Переказуйте актив через нативну мережу або дешевий блокчейн (наприклад, Arbitrum/Optimism/TRC20), якщо він підтримується обома біржами. Комісія мережі зазвичай становить від $0.1 до $1."
+                        # Оцінка ліквідності та кількість прокрутів на $100
+                        vol_buy = ex_prices[ex_buy]['volume']
+                        vol_sell = ex_prices[ex_sell]['volume']
+                        min_vol = min(vol_buy, vol_sell)
+                        
+                        if min_vol > 500000:
+                            liq_status = "Висока 🟢"
+                            spins = "5–10+ прокрутів"
+                        elif min_vol > 100000:
+                            liq_status = "Середня 🟡"
+                            spins = "3–5 прокрутів"
+                        else:
+                            liq_status = "Помірні обсяги 🟠"
+                            spins = "1–2 прокрути"
 
                         raw_signals.append({
                             'symbol': symbol,
@@ -119,10 +135,11 @@ def background_scanner():
                             'buy_price': ask_price,
                             'sell_price': bid_price,
                             'spread': round(spread, 2),
-                            'advice': fee_advice
+                            'liquidity': liq_status,
+                            'spins_100': spins
                         })
 
-        # Залишаємо тільки найкращий сигнал для кожної монети
+        # Залишаємо ТІЛЬКИ найкращий сигнал для кожної монети
         best_per_coin = {}
         for sig in raw_signals:
             sym = sig['symbol']
@@ -301,7 +318,7 @@ HTML_TEMPLATE = """
         .modal-body p {
             font-size: 13px;
             color: var(--secondary-text);
-            margin: 6px 0;
+            margin: 8px 0;
             line-height: 1.4;
         }
         .modal-body strong {
@@ -323,137 +340,3 @@ HTML_TEMPLATE = """
         }
         .no-signals {
             text-align: center;
-            padding: 40px 20px;
-            color: var(--secondary-text);
-            font-size: 14px;
-        }
-        .loader {
-            border: 3px solid var(--border-color);
-            border-top: 3px solid var(--accent-color);
-            border-radius: 50%;
-            width: 24px;
-            height: 24px;
-            animation: spin 1s linear infinite;
-            margin: 20px auto;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>⚡ Safe Crypto Arbitrage</h1>
-        <div class="status-badge" id="status">LIVE 🟢</div>
-    </div>
-
-    <div id="signals" class="signals-container">
-        <div class="loader"></div>
-        <div class="no-signals">Скануємо ліквідні ринкові пари...</div>
-    </div>
-
-    <!-- Модальне вікно деталей -->
-    <div id="signalModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <span class="modal-title" id="modalCoin">BTC/USDT</span>
-                <button class="close-btn" onclick="closeModal()">✕</button>
-            </div>
-            <div class="modal-body" id="modalBody"></div>
-            <button class="action-btn" onclick="closeModal()">Зрозуміло</button>
-        </div>
-    </div>
-
-    <script>
-        let tg = window.Telegram.WebApp;
-        tg.expand();
-        let currentSignals = [];
-
-        async function fetchSignals() {
-            try {
-                let response = await fetch('/api/signals');
-                let data = await response.json();
-                currentSignals = data;
-                let container = document.getElementById('signals');
-                
-                if (data.length === 0) {
-                    container.innerHTML = '<div class="no-signals">Чекаємо стабільні спреди по ліквідних монетах...</div>';
-                    return;
-                }
-
-                let html = '';
-                data.forEach((sig, index) => {
-                    html += `
-                        <div class="signal-card" onclick="openModal(${index})">
-                            <div class="signal-header">
-                                <span class="coin-name">${sig.symbol}</span>
-                                <span class="spread-badge">+${sig.spread}%</span>
-                            </div>
-                            <div class="route-box">
-                                <div class="exchange-col">
-                                    <span class="ex-title">Купити на</span>
-                                    <span class="ex-name">${sig.buy_exchange}</span>
-                                    <span class="ex-price">${sig.buy_price}</span>
-                                </div>
-                                <div class="arrow">➔</div>
-                                <div class="exchange-col" style="text-align: right;">
-                                    <span class="ex-title">Продати на</span>
-                                    <span class="ex-name">${sig.sell_exchange}</span>
-                                    <span class="ex-price">${sig.sell_price}</span>
-                                </div>
-                            </div>
-                            <div class="tap-hint">Натисніть для деталей та комісій мережі 👆</div>
-                        </div>
-                    `;
-                });
-                container.innerHTML = html;
-            } catch (e) {
-                console.error('Помилка завантаження:', e);
-            }
-        }
-
-        function openModal(index) {
-            let sig = currentSignals[index];
-            if (!sig) return;
-
-            document.getElementById('modalCoin').innerText = `${sig.symbol} (Спред: +${sig.spread}%)`;
-            
-            let bodyHtml = `
-                <p>🛒 <strong>Купити на біржі:</strong> ${sig.buy_exchange.toUpperCase()} по ціні <code>${sig.buy_price}</code></p>
-                <p>💰 <strong>Продати на біржі:</strong> ${sig.sell_exchange.toUpperCase()} по ціні <code>${sig.sell_price}</code></p>
-                <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 10px 0;">
-                <p>⚙️ <strong>Інструкція та комісії:</strong></p>
-                <p>${sig.advice}</p>
-                <p style="color: #38bdf8; margin-top: 8px;">💡 <em>Торгова комісія більшості бірж ~0.1% на вході і виході. Завжди залишайте запас на рух ціни!</em></p>
-            `;
-            
-            document.getElementById('modalBody').innerHTML = bodyHtml;
-            document.getElementById('signalModal').style.display = 'flex';
-        }
-
-        function closeModal() {
-            document.getElementById('signalModal').style.display = 'none';
-        }
-
-        setInterval(fetchSignals, 4000);
-        fetchSignals();
-    </script>
-</body>
-</html>
-"""
-
-@app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
-
-@app.route('/api/signals')
-def get_signals():
-    return jsonify(latest_signals)
-
-if __name__ == '__main__':
-    scanner_thread = threading.Thread(target=background_scanner, daemon=True)
-    scanner_thread.start()
-    
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
