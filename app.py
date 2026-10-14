@@ -1,20 +1,19 @@
 import os
 import time
 import threading
+import concurrent.futures
 from flask import Flask, render_template_string, jsonify
 import ccxt
 import telebot
-from telebot import types
 
 app = Flask(__name__)
 
-# ================= НАЛАШТУВАННЯ =================
-TOKEN = "8634056973:AAF2eMhsePo5ndZbbjBndqvIdYkBRKcT2k4"  # <--- Встав сюди свій токен від @BotFather
-# ===============================================
-
+# ==================== НАЛАШТУВАННЯ ====================
+TOKEN = "8634056973:AAF2eMhsePo5ndZbbj8ndqvIdYKBRKCt2k4" 
 bot = telebot.TeleBot(TOKEN)
 latest_signals = []
 
+# 10 перевірених криптобірж через CCXT
 EXCHANGES = {
     'binance': ccxt.binance({'enableRateLimit': True}),
     'bybit': ccxt.bybit({'enableRateLimit': True}),
@@ -22,125 +21,276 @@ EXCHANGES = {
     'whitebit': ccxt.whitebit({'enableRateLimit': True}),
     'bitget': ccxt.bitget({'enableRateLimit': True}),
     'htx': ccxt.htx({'enableRateLimit': True}),
-    'woo': ccxt.woo({'enableRateLimit': True})
+    'woo': ccxt.woo({'enableRateLimit': True}),
+    'kraken': ccxt.kraken({'enableRateLimit': True}),
+    'mexc': ccxt.mexc({'enableRateLimit': True}),
+    'gate': ccxt.gate({'enableRateLimit': True})
 }
 
-SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 'NEAR/USDT', 'AVAX/USDT']
+# Розширений список популярних монет
+SYMBOLS = [
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 
+    'NEAR/USDT', 'AVAX/USDT', 'ADA/USDT', 'DOT/USDT', 'LINK/USDT', 
+    'SUI/USDT', 'ARB/USDT', 'OP/USDT', 'PEPE/USDT', 'RENDER/USDT'
+]
+
+def fetch_ticker_price(exchange_name, exchange_obj, symbol):
+    try:
+        ticker = exchange_obj.fetch_ticker(symbol)
+        if ticker and 'bid' in ticker and 'ask' in ticker:
+            return exchange_name, symbol, ticker['bid'], ticker['ask']
+    except Exception:
+        pass
+    return None
 
 def background_scanner():
     global latest_signals
-    print("🔄 Фоновий багатобіржовий сканер запущено у хмарі...")
+    print("🚀 Швидкий багатопотоковий сканер запущено у хмарі...")
     while True:
         found_signals = []
-        target_capital = 1000.0
-
+        tasks = []
+        
         for symbol in SYMBOLS:
-            order_books = {}
-            for ex_name, ex_client in EXCHANGES.items():
-                try:
-                    book = ex_client.fetch_order_book(symbol, limit=5)
-                    if book['asks'] and book['bids']:
-                        order_books[ex_name] = {
-                            'ask': book['asks'][0][0],
-                            'bid': book['bids'][0][0]
-                        }
-                except Exception:
-                    continue
+            for ex_name, ex in EXCHANGES.items():
+                tasks.append((ex_name, ex, symbol))
 
-            ex_names = list(order_books.keys())
-            for i in range(len(ex_names)):
-                for j in range(len(ex_names)):
-                    if i == j: continue
-                    buy_ex = ex_names[i]
-                    sell_ex = ex_names[j]
-                    buy_price = order_books[buy_ex]['ask']
-                    sell_price = order_books[sell_ex]['bid']
-                    
-                    if sell_price > buy_price:
-                        bought_amount = target_capital / buy_price
-                        revenue = bought_amount * sell_price
-                        fees = (target_capital * 0.002) + 1.0
-                        net_profit = revenue - target_capital - fees
-                        spread_pct = ((sell_price - buy_price) / buy_price) * 100
+        prices_data = {}
+        # Паралельне опитування всіх бірж одночасно
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            future_to_exchange = {
+                executor.submit(fetch_ticker_price, ex_name, ex, symbol): (ex_name, symbol) 
+                for ex_name, ex, symbol in tasks
+            }
+            for future in concurrent.futures.as_completed(future_to_exchange):
+                res = future.result()
+                if res:
+                    ex_name, symbol, bid, ask = res
+                    if symbol not in prices_data:
+                        prices_data[symbol] = {}
+                    prices_data[symbol][ex_name] = {'bid': bid, 'ask': ask}
 
-                        if net_profit > 15.0:
-                            found_signals.append({
-                                'symbol': symbol.replace('/', '-'),
-                                'buy_ex': buy_ex.upper(),
-                                'sell_ex': sell_ex.upper(),
-                                'buy_price': round(buy_price, 4),
-                                'sell_price': round(sell_price, 4),
-                                'spread_pct': round(spread_pct, 2),
-                                'net_profit': round(net_profit, 2),
-                                'time': '3-5 хв.'
-                            })
+        # Пошук арбітражних зв'язок
+        for symbol, ex_prices in prices_data.items():
+            ex_list = list(ex_prices.keys())
+            for i in range(len(ex_list)):
+                for j in range(len(ex_list)):
+                    if i == j:
+                        continue
+                    ex_buy = ex_list[i]
+                    ex_sell = ex_list[j]
 
-        found_signals.sort(key=lambda x: x['net_profit'], reverse=True)
-        latest_signals = found_signals
-        time.sleep(45)
+                    ask_price = ex_prices[ex_buy]['ask']
+                    bid_price = ex_prices[ex_sell]['bid']
 
-MINI_APP_HTML = """
+                    if not ask_price or not bid_price or ask_price <= 0:
+                        continue
+
+                    spread = ((bid_price - ask_price) / ask_price) * 100
+
+                    # Фільтр реалістичного спреду (від 0.2% до 25%)
+                    if 0.2 <= spread <= 25.0:
+                        found_signals.append({
+                            'symbol': symbol,
+                            'buy_exchange': ex_buy,
+                            'sell_exchange': ex_sell,
+                            'buy_price': ask_price,
+                            'sell_price': bid_price,
+                            'spread': round(spread, 2)
+                        })
+
+        # Сортуємо від найвигідніших до менших
+        found_signals = sorted(found_signals, key=lambda x: x['spread'], reverse=True)
+        latest_signals = found_signals[:40]
+        time.sleep(3)
+
+# HTML/JS Інтерфейс Telegram Mini App
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="uk">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CryptoArb Pro</title>
+    <title>Crypto Arbitrage Scanner</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #ffffff; margin: 0; padding: 16px; color: #222; }
-        .header-btn { background-color: #ffffff; color: #2481cc; border: 2px solid #2481cc; padding: 12px; border-radius: 14px; font-size: 15px; font-weight: 600; width: 100%; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.03); }
-        .no-signals { text-align: center; color: #999999; font-size: 13px; margin-top: 50px; }
-        .signal-card { background: #ffffff; border-radius: 16px; padding: 16px; margin-top: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); border: 1px solid #eaeaea; cursor: pointer; }
-        .signal-header { display: flex; justify-content: space-between; align-items: center; font-weight: 700; font-size: 18px; }
-        .spread-badge { color: #2e7d32; background: #e8f5e9; padding: 4px 10px; border-radius: 8px; font-size: 14px; }
-        .signal-row { display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px; color: #555; }
-        .divider { height: 1px; background: #eee; margin: 12px 0; }
-        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); justify-content: center; align-items: center; padding: 20px; box-sizing: border-box; }
-        .modal-content { background: #fff; padding: 20px; border-radius: 16px; width: 100%; max-width: 320px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
-        .btn { background-color: #2481cc; color: white; border: none; padding: 12px 20px; border-radius: 12px; font-size: 15px; font-weight: 600; width: 100%; cursor: pointer; margin-top: 15px; }
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-color: #f8fafc;
+            --accent-color: #10b981;
+            --secondary-text: #94a3b8;
+            --border-color: #334155;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 12px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 14px;
+            padding: 0 4px;
+        }
+        h1 {
+            font-size: 18px;
+            margin: 0;
+            font-weight: 700;
+        }
+        .status-badge {
+            font-size: 11px;
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--accent-color);
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-weight: 600;
+        }
+        .signals-container {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .signal-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 12px 14px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        .signal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .coin-name {
+            font-size: 15px;
+            font-weight: 700;
+            color: #ffffff;
+        }
+        .spread-badge {
+            background: #10b981;
+            color: #0f172a;
+            font-weight: 800;
+            font-size: 13px;
+            padding: 3px 8px;
+            border-radius: 6px;
+        }
+        .route-box {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(15, 23, 42, 0.5);
+            padding: 8px 10px;
+            border-radius: 8px;
+            font-size: 13px;
+        }
+        .exchange-col {
+            display: flex;
+            flex-direction: column;
+        }
+        .ex-title {
+            font-size: 10px;
+            color: var(--secondary-text);
+            text-transform: uppercase;
+        }
+        .ex-name {
+            font-weight: 600;
+            color: #e2e8f0;
+            text-transform: uppercase;
+        }
+        .ex-price {
+            font-family: monospace;
+            color: #38bdf8;
+            font-size: 12px;
+        }
+        .arrow {
+            color: var(--secondary-text);
+            font-weight: bold;
+            font-size: 16px;
+        }
+        .no-signals {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--secondary-text);
+            font-size: 14px;
+        }
+        .loader {
+            border: 3px solid var(--border-color);
+            border-top: 3px solid var(--accent-color);
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
-    <button class="header-btn" onclick="loadSignals()">🔄 Оновити список</button>
-    <div id="signal-container"><div class="no-signals">Завантаження актуальних зв'язок...</div></div>
-    <div id="modal" class="modal" onclick="closeModal(event)"><div class="modal-content" onclick="event.stopPropagation()"><h3>📖 Алгоритм виконання</h3><p id="modal-text" style="font-size: 14px; color: #444; line-height: 1.5;"></p><button class="btn" onclick="document.getElementById('modal').style.display='none'">Закрити</button></div></div>
+    <div class="header">
+        <h1>⚡ Crypto Scanner</h1>
+        <div class="status-badge" id="status">LIVE 🟢</div>
+    </div>
+
+    <div id="signals" class="signals-container">
+        <div class="loader"></div>
+        <div class="no-signals">Скануємо 10 бірж та 15 монет...</div>
+    </div>
+
     <script>
-        const tg = window.Telegram.WebApp;
+        let tg = window.Telegram.WebApp;
         tg.expand();
-        let currentSignalsList = [];
-        async function loadSignals() {
-            const container = document.getElementById('signal-container');
-            container.innerHTML = '<div class="no-signals">Скануємо топ-біржі...</div>';
+
+        async function fetchSignals() {
             try {
-                const response = await fetch('/api/get_signals');
-                const data = await response.json();
-                if (data.status === 'success' && data.signals.length > 0) {
-                    currentSignalsList = data.signals;
-                    let html = '';
-                    data.signals.forEach((sig, index) => {
-                        html += `
-                            <div class="signal-card" onclick="openModal(${index})">
-                                <div class="signal-header"><span>🪙 ${sig.symbol}</span><span class="spread-badge">+${sig.spread_pct}% (+$${sig.net_profit})</span></div>
-                                <div class="divider"></div>
-                                <div class="signal-row"><span>🟢 Купівля: <b>${sig.buy_ex}</b></span><span>Ціна: <b>${sig.buy_price}</b></span></div>
-                                <div class="signal-row"><span>🔴 Продаж: <b>${sig.sell_ex}</b></span><span>Ціна: <b>${sig.sell_price}</b></span></div>
-                                <div class="divider"></div>
-                                <div class="signal-row" style="font-size: 12px; color: #888;"><span>Капітал: $1,000</span><span>Час виводу: ~${sig.time}</span></div>
-                            </div>`;
-                    });
-                    container.innerHTML = html;
-                } else { container.innerHTML = '<div class="no-signals">немає сигналів (чекаємо спред)</div>'; }
-            } catch (e) { container.innerHTML = '<div class="no-signals">Помилка зв\'язку з сервером</div>'; }
+                let response = await fetch('/api/signals');
+                let data = await response.json();
+                let container = document.getElementById('signals');
+                
+                if (data.length === 0) {
+                    container.innerHTML = '<div class="no-signals">Збираємо свіжі ринкові дані, зачекайте кілька секунд...</div>';
+                    return;
+                }
+
+                let html = '';
+                data.forEach(sig => {
+                    html += `
+                        <div class="signal-card">
+                            <div class="signal-header">
+                                <span class="coin-name">${sig.symbol}</span>
+                                <span class="spread-badge">+${sig.spread}%</span>
+                            </div>
+                            <div class="route-box">
+                                <div class="exchange-col">
+                                    <span class="ex-title">Купити на</span>
+                                    <span class="ex-name">${sig.buy_exchange}</span>
+                                    <span class="ex-price">${sig.buy_price}</span>
+                                </div>
+                                <div class="arrow">➔</div>
+                                <div class="exchange-col" style="text-align: right;">
+                                    <span class="ex-title">Продати на</span>
+                                    <span class="ex-name">${sig.sell_exchange}</span>
+                                    <span class="ex-price">${sig.sell_price}</span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+                container.innerHTML = html;
+            } catch (e) {
+                console.error('Помилка завантаження:', e);
+            }
         }
-        function openModal(index) {
-            const s = currentSignalsList[index];
-            if (!s) return;
-            document.getElementById('modal-text').innerHTML = `1. Переведіть $1,000 на <b>${s.buy_ex}</b>.<br><br>2. Придбайте <b>${s.symbol}</b> по <code>${s.buy_price}</code>.<br><br>3. Здійсніть вивід на <b>${s.sell_ex}</b>.<br><br>4. Продайте по <code>${s.sell_price}</code>. Чистий прибуток: ~<b>+$${s.net_profit}</b>!`;
-            document.getElementById('modal').style.display = 'flex';
-        }
-        function closeModal(e) { document.getElementById('modal').style.display = 'none'; }
-        loadSignals();
+
+        setInterval(fetchSignals, 4000);
+        fetchSignals();
     </script>
 </body>
 </html>
@@ -148,13 +298,15 @@ MINI_APP_HTML = """
 
 @app.route('/')
 def index():
-    return render_template_string(MINI_APP_HTML)
+    return render_template_string(HTML_TEMPLATE)
 
-@app.route('/api/get_signals')
-def get_signals_api():
-    return jsonify({'status': 'success', 'signals': latest_signals})
+@app.route('/api/signals')
+def get_signals():
+    return jsonify(latest_signals)
 
 if __name__ == '__main__':
-    threading.Thread(target=background_scanner, daemon=True).start()
-    port = int(os.environ.get('PORT', 5000))
+    scanner_thread = threading.Thread(target=background_scanner, daemon=True)
+    scanner_thread.start()
+    
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
