@@ -50,7 +50,7 @@ def fetch_exchange_data(exchange_name, exchange_obj):
 
 def background_scanner():
     global latest_signals
-    print("🚀 Оновлений сканер ліквідності запрацював...")
+    print("🚀 Сканер ліквідності запрацював...")
     
     while True:
         raw_signals = []
@@ -79,7 +79,7 @@ def background_scanner():
                         if ticker:
                             bid = ticker.get('bid')
                             ask = ticker.get('ask')
-                            quote_volume = ticker.get('quoteVolume', 50000) # обсяги за 24г
+                            quote_volume = ticker.get('quoteVolume', 50000)
                             if bid and ask and float(bid) > 0 and float(ask) > 0:
                                 if symbol not in prices_data:
                                     prices_data[symbol] = {}
@@ -91,7 +91,6 @@ def background_scanner():
                 except Exception:
                     continue
 
-        # Пошук арбітражу
         for symbol, ex_prices in prices_data.items():
             ex_list = list(ex_prices.keys())
             if len(ex_list) < 2:
@@ -113,7 +112,6 @@ def background_scanner():
                     spread = ((bid_price - ask_price) / ask_price) * 100
 
                     if 0.5 <= spread <= 8.0:
-                        # Оцінка ліквідності та кількість прокрутів на $100
                         vol_buy = ex_prices[ex_buy]['volume']
                         vol_sell = ex_prices[ex_sell]['volume']
                         min_vol = min(vol_buy, vol_sell)
@@ -139,7 +137,6 @@ def background_scanner():
                             'spins_100': spins
                         })
 
-        # Залишаємо ТІЛЬКИ найкращий сигнал для кожної монети
         best_per_coin = {}
         for sig in raw_signals:
             sym = sig['symbol']
@@ -152,7 +149,6 @@ def background_scanner():
         latest_signals = found_signals[:30]
         time.sleep(3)
 
-# HTML/JS Інтерфейс Telegram Mini App
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="uk">
@@ -273,7 +269,6 @@ HTML_TEMPLATE = """
             text-align: center;
             margin-top: 6px;
         }
-        /* Modal */
         .modal {
             display: none;
             position: fixed;
@@ -340,3 +335,136 @@ HTML_TEMPLATE = """
         }
         .no-signals {
             text-align: center;
+            padding: 40px 20px;
+            color: var(--secondary-text);
+            font-size: 14px;
+        }
+        .loader {
+            border: 3px solid var(--border-color);
+            border-top: 3px solid var(--accent-color);
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>⚡ Safe Crypto Arbitrage</h1>
+        <div class="status-badge" id="status">LIVE 🟢</div>
+    </div>
+
+    <div id="signals" class="signals-container">
+        <div class="loader"></div>
+        <div class="no-signals">Скануємо ринкові пари...</div>
+    </div>
+
+    <div id="signalModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span class="modal-title" id="modalCoin">BTC/USDT</span>
+                <button class="close-btn" onclick="closeModal()">✕</button>
+            </div>
+            <div class="modal-body" id="modalBody"></div>
+            <button class="action-btn" onclick="closeModal()">Зрозуміло</button>
+        </div>
+    </div>
+
+    <script>
+        let tg = window.Telegram.WebApp;
+        tg.expand();
+        let currentSignals = [];
+
+        async function fetchSignals() {
+            try {
+                let response = await fetch('/api/signals');
+                let data = await response.json();
+                currentSignals = data;
+                let container = document.getElementById('signals');
+                
+                if (data.length === 0) {
+                    container.innerHTML = '<div class="no-signals">Аналізуємо спреди по ліквідних монетах...</div>';
+                    return;
+                }
+
+                let html = '';
+                data.forEach((sig, index) => {
+                    html += `
+                        <div class="signal-card" onclick="openModal(${index})">
+                            <div class="signal-header">
+                                <span class="coin-name">${sig.symbol}</span>
+                                <span class="spread-badge">+${sig.spread}%</span>
+                            </div>
+                            <div class="route-box">
+                                <div class="exchange-col">
+                                    <span class="ex-title">Купити</span>
+                                    <span class="ex-name">${sig.buy_exchange}</span>
+                                    <span class="ex-price">${sig.buy_price}</span>
+                                </div>
+                                <div class="arrow">➔</div>
+                                <div class="exchange-col" style="text-align: right;">
+                                    <span class="ex-title">Продати</span>
+                                    <span class="ex-name">${sig.sell_exchange}</span>
+                                    <span class="ex-price">${sig.sell_price}</span>
+                                </div>
+                            </div>
+                            <div class="tap-hint">Натисніть для деталей ліквідності та часу 👆</div>
+                        </div>
+                    `;
+                });
+                container.innerHTML = html;
+            } catch (e) {
+                console.error('Помилка завантаження:', e);
+            }
+        }
+
+        function openModal(index) {
+            let sig = currentSignals[index];
+            if (!sig) return;
+
+            document.getElementById('modalCoin').innerText = `${sig.symbol} (+${sig.spread}%)`;
+            
+            let bodyHtml = `
+                <p>📊 <strong>Ліквідність:</strong> ${sig.liquidity}</p>
+                <p>🔄 <strong>Прокрути на $100:</strong> Доступно <code>${sig.spins_100}</code> без втрати спреду</p>
+                <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 10px 0;">
+                <p>⚡ <strong>Мережа TRC-20 (USDT):</strong></p>
+                <p>⏱️ <strong>Час транзакції:</strong> приблизно <code>2–5 хвилин</code></p>
+                <p>💸 <strong>Комісія мережі:</strong> ~$1</p>
+            `;
+            
+            document.getElementById('modalBody').innerHTML = bodyHtml;
+            document.getElementById('signalModal').style.display = 'flex';
+        }
+
+        function closeModal() {
+            document.getElementById('signalModal').style.display = 'none';
+        }
+
+        setInterval(fetchSignals, 4000);
+        fetchSignals();
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/signals')
+def get_signals():
+    return jsonify(latest_signals)
+
+if __name__ == '__main__':
+    scanner_thread = threading.Thread(target=background_scanner, daemon=True)
+    scanner_thread.start()
+    
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
