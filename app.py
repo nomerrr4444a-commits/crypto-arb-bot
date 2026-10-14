@@ -27,14 +27,13 @@ EXCHANGES = {
     'gate': ccxt.gate({'enableRateLimit': True, 'timeout': 5000})
 }
 
-# Розширений список монет, включаючи AI-токені та трендові пари
+# Список стабільних, ліквідних монет для безпечного арбітражу
 SYMBOLS = [
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 
-    'NEAR/USDT', 'AVAX/USDT', 'ADA/USDT', 'DOT/USDT', 'LINK/USDT', 
-    'SUI/USDT', 'ARB/USDT', 'OP/USDT', 'PEPE/USDT', 'RENDER/USDT',
-    'MNT/USDT', 'TON/USDT', 'TIA/USDT', 'INJ/USDT', 'SEI/USDT',
-    'APT/USDT', 'FET/USDT', 'WLD/USDT', 'STRK/USDT', 'AI/USDT', 
-    'TAO/USDT', 'GRT/USDT', 'OCEAN/USDT', 'AGIX/USDT', 'PNUT/USDT', 'NEIRO/USDT'
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 
+    'AVAX/USDT', 'DOT/USDT', 'LINK/USDT', 'NEAR/USDT', 'SUI/USDT', 
+    'ARB/USDT', 'OP/USDT', 'RENDER/USDT', 'MNT/USDT', 'TON/USDT', 
+    'TIA/USDT', 'INJ/USDT', 'SEI/USDT', 'APT/USDT', 'ATOM/USDT',
+    'LTC/USDT', 'UNI/USDT', 'POL/USDT'
 ]
 
 def fetch_exchange_data(exchange_name, exchange_obj):
@@ -51,7 +50,7 @@ def fetch_exchange_data(exchange_name, exchange_obj):
 
 def background_scanner():
     global latest_signals
-    print("🚀 Розширений сканер AI та арбітражу запущено у хмарі...")
+    print("🚀 Сканер стабільних арбітражних зв'язок запущено...")
     
     while True:
         raw_signals = []
@@ -88,7 +87,7 @@ def background_scanner():
                 except Exception:
                     continue
 
-        # Пошук арбітражних можливостей
+        # Пошук арбітражу на надійних монетах
         for symbol, ex_prices in prices_data.items():
             ex_list = list(ex_prices.keys())
             if len(ex_list) < 2:
@@ -109,12 +108,9 @@ def background_scanner():
 
                     spread = ((bid_price - ask_price) / ask_price) * 100
 
-                    # Розширюємо межі до 40% для відлову унікальних AI/волатильних спредів
-                    if 0.3 <= spread <= 40.0:
-                        # Формуємо поради щодо переказу та комісій
-                        fee_advice = "Використовуйте мережу з найнижчою комісією (наприклад, BSC, TRC20 для стейблкоїнів або нативну мережу монети). Торгові комісії бірж зазвичай становлять 0.1%."
-                        if "USDT" in symbol:
-                            fee_advice = "Для виведення/переказу USDT обирайте мережу TRC20 (~$1) або Arbitrum/Polygon (~$0.1), якщо вона підтримується обома біржами."
+                    # Фокусуємося на здорових, реалістичних спредах від 0.5% до 8.0%
+                    if 0.5 <= spread <= 8.0:
+                        fee_advice = f"Для монети {symbol}: купуйте на {ex_buy.upper()}, продавайте на {ex_sell.upper()}. Переказуйте актив через нативну мережу або дешевий блокчейн (наприклад, Arbitrum/Optimism/TRC20), якщо він підтримується обома біржами. Комісія мережі зазвичай становить від $0.1 до $1."
 
                         raw_signals.append({
                             'symbol': symbol,
@@ -126,7 +122,7 @@ def background_scanner():
                             'advice': fee_advice
                         })
 
-        # Фільтрація: залишаємо ТІЛЬКИ найкращий сигнал для кожної монети
+        # Залишаємо тільки найкращий сигнал для кожної монети
         best_per_coin = {}
         for sig in raw_signals:
             sym = sig['symbol']
@@ -136,10 +132,10 @@ def background_scanner():
         found_signals = list(best_per_coin.values())
         found_signals = sorted(found_signals, key=lambda x: x['spread'], reverse=True)
         
-        latest_signals = found_signals[:35]
+        latest_signals = found_signals[:30]
         time.sleep(3)
 
-# HTML/JS Інтерфейс Telegram Mini App з інтерактивними модалками
+# HTML/JS Інтерфейс Telegram Mini App
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="uk">
@@ -156,7 +152,6 @@ HTML_TEMPLATE = """
             --accent-color: #10b981;
             --secondary-text: #94a3b8;
             --border-color: #334155;
-            --modal-bg: #1e293b;
         }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -349,13 +344,13 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="header">
-        <h1>⚡ AI & Crypto Scanner</h1>
+        <h1>⚡ Safe Crypto Arbitrage</h1>
         <div class="status-badge" id="status">LIVE 🟢</div>
     </div>
 
     <div id="signals" class="signals-container">
         <div class="loader"></div>
-        <div class="no-signals">Скануємо ринок та AI-монети...</div>
+        <div class="no-signals">Скануємо ліквідні ринкові пари...</div>
     </div>
 
     <!-- Модальне вікно деталей -->
@@ -365,9 +360,7 @@ HTML_TEMPLATE = """
                 <span class="modal-title" id="modalCoin">BTC/USDT</span>
                 <button class="close-btn" onclick="closeModal()">✕</button>
             </div>
-            <div class="modal-body" id="modalBody">
-                <!-- Контент заповнюється динамічно -->
-            </div>
+            <div class="modal-body" id="modalBody"></div>
             <button class="action-btn" onclick="closeModal()">Зрозуміло</button>
         </div>
     </div>
@@ -385,7 +378,7 @@ HTML_TEMPLATE = """
                 let container = document.getElementById('signals');
                 
                 if (data.length === 0) {
-                    container.innerHTML = '<div class="no-signals">Шукаємо вигідні спреди по AI та топ-монетах...</div>';
+                    container.innerHTML = '<div class="no-signals">Чекаємо стабільні спреди по ліквідних монетах...</div>';
                     return;
                 }
 
@@ -410,7 +403,7 @@ HTML_TEMPLATE = """
                                     <span class="ex-price">${sig.sell_price}</span>
                                 </div>
                             </div>
-                            <div class="tap-hint">Натисніть для перегляду комісій та інструкції 👆</div>
+                            <div class="tap-hint">Натисніть для деталей та комісій мережі 👆</div>
                         </div>
                     `;
                 });
@@ -430,9 +423,9 @@ HTML_TEMPLATE = """
                 <p>🛒 <strong>Купити на біржі:</strong> ${sig.buy_exchange.toUpperCase()} по ціні <code>${sig.buy_price}</code></p>
                 <p>💰 <strong>Продати на біржі:</strong> ${sig.sell_exchange.toUpperCase()} по ціні <code>${sig.sell_price}</code></p>
                 <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 10px 0;">
-                <p>⚙️ <strong>Комісії та переказ:</strong></p>
+                <p>⚙️ <strong>Інструкція та комісії:</strong></p>
                 <p>${sig.advice}</p>
-                <p style="color: #38bdf8; margin-top: 8px;">💡 <em>Порада: Завжди перевіряйте відкриті мережі для введення/виведення на обох біржах перед здійсненням арбітражу!</em></p>
+                <p style="color: #38bdf8; margin-top: 8px;">💡 <em>Торгова комісія більшості бірж ~0.1% на вході і виході. Завжди залишайте запас на рух ціни!</em></p>
             `;
             
             document.getElementById('modalBody').innerHTML = bodyHtml;
