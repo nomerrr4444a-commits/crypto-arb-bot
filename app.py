@@ -27,53 +27,72 @@ EXCHANGES = {
     'gate': ccxt.gate({'enableRateLimit': True, 'timeout': 5000})
 }
 
+# Розширений список монет
 SYMBOLS = [
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 
     'NEAR/USDT', 'AVAX/USDT', 'ADA/USDT', 'DOT/USDT', 'LINK/USDT', 
-    'SUI/USDT', 'ARB/USDT', 'OP/USDT', 'PEPE/USDT', 'RENDER/USDT'
+    'SUI/USDT', 'ARB/USDT', 'OP/USDT', 'PEPE/USDT', 'RENDER/USDT',
+    'MNT/USDT', 'TON/USDT', 'TIA/USDT', 'INJ/USDT', 'SEI/USDT',
+    'APT/USDT', 'FET/USDT', 'WLD/USDT', 'STRK/USDT'
 ]
 
-def fetch_exchange_tickers(exchange_name, exchange_obj):
+def fetch_exchange_data(exchange_name, exchange_obj):
     try:
-        tickers = exchange_obj.fetch_tickers(SYMBOLS)
+        exchange_obj.load_markets()
+        tickers = exchange_obj.fetch_tickers()
         return exchange_name, tickers
     except Exception:
         try:
-            tickers = exchange_obj.fetch_tickers()
+            tickers = exchange_obj.fetch_tickers(SYMBOLS)
             return exchange_name, tickers
         except Exception:
             return exchange_name, {}
 
 def background_scanner():
     global latest_signals
-    print("🚀 Стабільний сканер запущено у хмарі...")
+    print("🚀 Розумний арбітражний сканер запущено у хмарі...")
+    
     while True:
-        found_signals = []
-        prices_data = {symbol: {} for symbol in SYMBOLS}
-        
+        raw_signals = []
+        prices_data = {}
+
+        # Паралельне опитування всіх 10 бірж
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_exchange = {
-                executor.submit(fetch_exchange_tickers, ex_name, ex): ex_name 
-                for ex_name, ex in EXCHANGES.items()
-            }
-            for future in concurrent.futures.as_completed(future_to_exchange):
+            futures = [executor.submit(fetch_exchange_data, ex_name, ex) for ex_name, ex in EXCHANGES.items()]
+            
+            for future in concurrent.futures.as_completed(futures):
                 try:
                     ex_name, tickers = future.result(timeout=6)
                     if not tickers:
                         continue
+                    
                     for symbol in SYMBOLS:
+                        ticker = None
                         if symbol in tickers:
-                            t = tickers[symbol]
-                            bid = t.get('bid')
-                            ask = t.get('ask')
-                            if bid and ask:
-                                prices_data[symbol][ex_name] = {'bid': bid, 'ask': ask}
+                            ticker = tickers[symbol]
+                        else:
+                            alt = symbol.replace('/', '')
+                            for k, v in tickers.items():
+                                if symbol in k or alt in k.replace('/', ''):
+                                    ticker = v
+                                    break
+                        
+                        if ticker:
+                            bid = ticker.get('bid')
+                            ask = ticker.get('ask')
+                            if bid and ask and float(bid) > 0 and float(ask) > 0:
+                                if symbol not in prices_data:
+                                    prices_data[symbol] = {}
+                                prices_data[symbol][ex_name] = {'bid': float(bid), 'ask': float(ask)}
                 except Exception:
                     continue
 
-        # Пошук арбітражу
+        # Пошук арбітражних можливостей
         for symbol, ex_prices in prices_data.items():
             ex_list = list(ex_prices.keys())
+            if len(ex_list) < 2:
+                continue
+                
             for i in range(len(ex_list)):
                 for j in range(len(ex_list)):
                     if i == j:
@@ -89,8 +108,8 @@ def background_scanner():
 
                     spread = ((bid_price - ask_price) / ask_price) * 100
 
-                    if 0.2 <= spread <= 25.0:
-                        found_signals.append({
+                    if 0.3 <= spread <= 30.0:
+                        raw_signals.append({
                             'symbol': symbol,
                             'buy_exchange': ex_buy,
                             'sell_exchange': ex_sell,
@@ -99,8 +118,18 @@ def background_scanner():
                             'spread': round(spread, 2)
                         })
 
+        # ФІЛЬТРАЦІЯ: залишаємо ТІЛЬКИ найкращий (найвигідніший) сигнал для кожної монети
+        best_per_coin = {}
+        for sig in raw_signals:
+            sym = sig['symbol']
+            if sym not in best_per_coin or sig['spread'] > best_per_coin[sym]['spread']:
+                best_per_coin[sym] = sig
+
+        found_signals = list(best_per_coin.values())
+        # Сортуємо від найбільшого спреду до найменшого
         found_signals = sorted(found_signals, key=lambda x: x['spread'], reverse=True)
-        latest_signals = found_signals[:40]
+        
+        latest_signals = found_signals[:30]
         time.sleep(3)
 
 # HTML/JS Інтерфейс Telegram Mini App
@@ -241,7 +270,7 @@ HTML_TEMPLATE = """
 
     <div id="signals" class="signals-container">
         <div class="loader"></div>
-        <div class="no-signals">Завантаження зв'язок...</div>
+        <div class="no-signals">Скануємо ринок та формуємо найкращі зв'язки...</div>
     </div>
 
     <script>
@@ -255,7 +284,7 @@ HTML_TEMPLATE = """
                 let container = document.getElementById('signals');
                 
                 if (data.length === 0) {
-                    container.innerHTML = '<div class="no-signals">Скануємо біржі, очікуйте кілька секунд...</div>';
+                    container.innerHTML = '<div class="no-signals">Збираємо свіжі дані з бірж, зачекайте кілька секунд...</div>';
                     return;
                 }
 
@@ -285,7 +314,7 @@ HTML_TEMPLATE = """
                 });
                 container.innerHTML = html;
             } catch (e) {
-                console.error('Помилка завантаження:', e);
+                console.error('Помилка:', e);
             }
         }
 
