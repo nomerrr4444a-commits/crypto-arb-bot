@@ -1,7 +1,7 @@
-                    exchange_id, data, errors = future.result()
-                    books[exchange_id] = data
-                    if errors:
-                        exchange_errors.append(f"{exchange_id}: стакан недоступний для {len(errors)} пар")
+    exchange_id, data, errors = future.result()
+    books[exchange_id] = data
+    if errors:
+               exchange_errors.append(f"{exchange_id}: стакан недоступний для {len(errors)} пар")
                 except Exception as exc:
                     exchange_errors.append(f"book worker: {type(exc).__name__}")
 
