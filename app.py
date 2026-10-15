@@ -141,3 +141,4 @@ if __name__ == "__main__":
         print(f"\nВідкрий у браузері: http://127.0.0.1:{port}")
         print("Пароль не зберігається у файлі. Не використовуй пароль від біржі.\n")
         app.run(host=host, port=port, debug=False, threaded=True, use_reloader=False)
+
