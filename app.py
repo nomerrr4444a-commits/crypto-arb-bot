@@ -12,17 +12,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Значно розширений список монет (популярні альткоїни, мемкоїни та мережеві монети)
+# Список монет для сканування в Telegram App
 COINS = [
     "NEARUSDT", "SUIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", 
     "TONUSDT", "LINKUSDT", "INJUSDT", "TIAUSDT", "AVAXUSDT", 
     "ATOMUSDT", "FETUSDT", "XRPUSDT", "TRXUSDT", "KASUSDT", 
     "PEPEUSDT", "DOGEUSDT", "SHIBUSDT", "RENDERUSDT", "SEIUSDT",
-    "JUPUSDT", "WIFUSDT", "POLUSDT", "NEARUSDT", "ICPUSDT",
-    "NEARUSDT", "FTMUSDT", "STXUSDT", "BCHUSDT", "LTCUSDT",
-    "ALGOUSDT", "ATOMUSDT", "NEARUSDT", "GRTUSDT", "RUNEUSDT"
+    "JUPUSDT", "WIFUSDT", "POLUSDT", "FTMUSDT", "STXUSDT", 
+    "BCHUSDT", "LTCUSDT", "ALGOUSDT", "GRTUSDT", "RUNEUSDT"
 ]
-# Видаляємо можливі дублікати за допомогою set
 COINS = list(set(COINS))
 
 @app.get("/api/arbitrage")
@@ -75,9 +73,9 @@ def get_arbitrage_opportunities():
 
         # Зв'язка 1: Купити на Binance, Продати на Bybit
         spread_1 = ((yb_data["bid"] - b_data["ask"]) / b_data["ask"]) * 100
-        net_profit_1 = (capital * (spread_1 / 100)) - 1.0  # Мінус комісія мережі TRC-20 ($1)
+        net_profit_1 = (capital * (spread_1 / 100)) - 1.0  # Комісія мережі TRC-20 ($1)
         
-        if spread_1 > 0.2 and net_profit_1 > 0:
+        if spread_1 > 0.3 and net_profit_1 > 0:
             depth = b_data["askQty"] * b_data["ask"]
             max_rounds = int(depth / capital) if capital > 0 else 1
             if max_rounds < 1: max_rounds = 1
@@ -101,7 +99,7 @@ def get_arbitrage_opportunities():
         spread_2 = ((b_data["bid"] - yb_data["ask"]) / yb_data["ask"]) * 100
         net_profit_2 = (capital * (spread_2 / 100)) - 1.0
         
-        if spread_2 > 0.2 and net_profit_2 > 0:
+        if spread_2 > 0.3 and net_profit_2 > 0:
             depth = yb_data["askQty"] * yb_data["ask"]
             max_rounds = int(depth / capital) if capital > 0 else 1
             if max_rounds < 1: max_rounds = 1
@@ -121,10 +119,10 @@ def get_arbitrage_opportunities():
                 "liquidityStatus": "Висока ($300+ доступно)"
             })
 
+    # Сортуємо за найбільшим чистим прибутком
     opportunities.sort(key=lambda x: x["netProfit"], reverse=True)
     return {"status": "success", "data": opportunities}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
- 
+    uvicorn.run(app, host="0.0.0.0", port=10000)
